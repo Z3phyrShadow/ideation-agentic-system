@@ -5,9 +5,9 @@ Entry point for the Discord AI assistant bot.
 
 Responsibilities:
   - Configure Discord client with correct intents.
-  - Register the /chat slash command to create a new thread and send the
-    first agent response.
-  - Listen for messages in bot-created threads and auto-respond.
+  - Listen for messages posted in the #ideas channel and automatically create
+    a thread on each message, then reply with the agent's first response.
+  - Auto-respond to follow-up messages inside bot-created threads.
   - Load thread IDs from SQLite on startup (persistence across restarts).
   - Load the system prompt from system_prompt.txt once at startup.
 """
@@ -17,12 +17,11 @@ import logging
 from pathlib import Path
 
 import discord
-from discord import app_commands
 
 from discord_agent import store
 from discord_agent.config import AGENT_CHANNEL_ID, DISCORD_TOKEN
 from discord_agent.graph import run_graph
-from discord_agent.memory import HUMAN_PREFIX, build_message_history
+from discord_agent.memory import build_message_history
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -64,17 +63,22 @@ intents.messages = True
 intents.guilds = True
 
 client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _get_agent_response(thread: discord.Thread) -> str:
+async def _get_agent_response(thread: discord.Thread, seed_content: str | None = None) -> str:
     """
     Reconstruct message history from the thread, invoke the LangGraph agent,
     and return the response string.
+
+    Args:
+        thread:       The Discord thread to read history from.
+        seed_content: Optional opening human message to inject at the start of
+                      history (used when the post lives in the parent channel,
+                      not inside the thread itself).
 
     LangGraph's .invoke() is synchronous, so we offload it to a thread pool
     to avoid blocking the Discord async event loop.
@@ -83,6 +87,7 @@ async def _get_agent_response(thread: discord.Thread) -> str:
         thread=thread,
         system_prompt=SYSTEM_PROMPT,
         bot_id=client.user.id,  # type: ignore[union-attr]
+        seed_content=seed_content,
     )
     response: str = await asyncio.to_thread(run_graph, messages)
     return response
@@ -125,7 +130,7 @@ async def send_chunked(channel: discord.abc.Messageable, content: str) -> None:
 
 @client.event
 async def on_ready() -> None:
-    """Sync slash commands, initialise DB, and restore persisted thread IDs."""
+    """Initialise DB and restore persisted thread IDs."""
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)  # type: ignore[union-attr]
 
     # Initialise SQLite and load previously created thread IDs.
@@ -133,38 +138,86 @@ async def on_ready() -> None:
     loaded = await store.load_threads()
     bot_threads.update(loaded)
     log.info("Loaded %d persisted thread IDs from database.", len(loaded))
-
-    # Sync slash commands to all guilds.
-    await tree.sync()
-    log.info("Slash commands synced. Bot is ready.")
+    log.info("Bot is ready. Listening on channel ID %d for new ideas.", AGENT_CHANNEL_ID)
 
 
 @client.event
 async def on_message(message: discord.Message) -> None:
     """
-    Auto-respond to user messages posted in bot-created threads.
+    Handle two cases:
 
-    Conditions for responding:
-      1. The message is not from a bot (prevents self-loops).
-      2. The message is in a thread (not a top-level channel).
-      3. The thread ID is in bot_threads (only our threads).
+    1. A user posts a NEW message directly in the #ideas channel
+       → Create a thread on that message and get the agent's opening response.
+
+    2. A user sends a FOLLOW-UP inside one of the bot-created threads
+       → Auto-respond with the agent.
     """
     # Ignore all bot messages (including our own).
     if message.author.bot:
         return
 
-    # Only react to messages inside threads.
+    # ------------------------------------------------------------------
+    # Case 1 — New message in the #ideas channel → spin up a thread
+    # ------------------------------------------------------------------
+    if (
+        isinstance(message.channel, discord.TextChannel)
+        and message.channel.id == AGENT_CHANNEL_ID
+    ):
+        channel: discord.TextChannel = message.channel
+
+        # Build a short thread name from the message content.
+        snippet = message.content[:80].strip().replace("\n", " ")
+        thread_name = f"💡 {snippet}" if snippet else f"idea-{message.id}"
+        thread_name = thread_name[:100]  # Discord limit
+
+        log.info(
+            "New idea in #ideas from %s (msg %d): %s",
+            message.author,
+            message.id,
+            message.content[:80],
+        )
+
+        # Create a public thread anchored to this specific message.
+        thread: discord.Thread = await channel.create_thread(
+            name=thread_name,
+            message=message,
+            type=discord.ChannelType.public_thread,
+        )
+
+        # Track the thread in memory and persist to DB.
+        bot_threads.add(thread.id)
+        await store.save_thread(thread.id)
+        log.info("Created thread %d ('%s')", thread.id, thread_name)
+
+        async with thread.typing():
+            try:
+                # Pass the original message content as seed_content so the
+                # agent has context without re-posting it into the thread.
+                response = await _get_agent_response(thread, seed_content=message.content)
+            except Exception:
+                log.exception("Error generating opening response for thread %d", thread.id)
+                await thread.send(
+                    "⚠️ An error occurred while generating a response. Please try again."
+                )
+                return
+
+        await send_chunked(thread, response)
+        return
+
+    # ------------------------------------------------------------------
+    # Case 2 — Follow-up message inside a bot-created thread
+    # ------------------------------------------------------------------
     if not isinstance(message.channel, discord.Thread):
         return
 
-    thread: discord.Thread = message.channel
+    thread = message.channel
 
     # Only respond in threads we created.
     if thread.id not in bot_threads:
         return
 
     log.info(
-        "New message in bot thread %d from %s: %s",
+        "Follow-up in thread %d from %s: %s",
         thread.id,
         message.author,
         message.content[:80],
@@ -181,70 +234,6 @@ async def on_message(message: discord.Message) -> None:
             return
 
     await send_chunked(thread, response)
-
-
-# ---------------------------------------------------------------------------
-# Slash command: /chat
-# ---------------------------------------------------------------------------
-
-
-@tree.command(name="chat", description="Start a new AI agent conversation thread.")
-@app_commands.describe(message="Your opening message to the agent.")
-async def chat_command(interaction: discord.Interaction, message: str) -> None:
-    """
-    /chat <message>
-
-    Creates a new thread in the designated agent channel, posts the user's
-    opening message through LangGraph, and replies with the agent's response.
-    """
-    await interaction.response.defer(ephemeral=True)
-
-    # Fetch the designated channel where threads are created.
-    channel = client.get_channel(AGENT_CHANNEL_ID)
-    if not isinstance(channel, discord.TextChannel):
-        await interaction.followup.send(
-            "⚠️ Agent channel not found or is not a text channel. "
-            "Check AGENT_CHANNEL_ID in your .env file.",
-            ephemeral=True,
-        )
-        return
-
-    # Create a new public thread in the agent channel.
-    thread_name = f"chat-{interaction.user.name}-{interaction.id}"[:100]
-    thread = await channel.create_thread(
-        name=thread_name,
-        type=discord.ChannelType.public_thread,
-    )
-
-    # Track the thread in memory and persist to DB.
-    bot_threads.add(thread.id)
-    await store.save_thread(thread.id)
-    log.info("Created thread %d ('%s') for user %s", thread.id, thread_name, interaction.user)
-
-    # Post the initialisation sentinel message.
-    await thread.send("Agent initialized.")
-
-    # Send the user's opening message to the thread, prefixed with HUMAN_PREFIX
-    # so memory.py correctly maps it as a HumanMessage (not AIMessage).
-    # This satisfies Gemini's constraint that requests end with a user role.
-    await thread.send(f"{HUMAN_PREFIX}{message}")
-
-    async with thread.typing():
-        try:
-            response = await _get_agent_response(thread)
-        except Exception:
-            log.exception("Error on initial /chat response for thread %d", thread.id)
-            await thread.send("⚠️ Failed to get a response from the agent. Please try again.")
-            await interaction.followup.send(
-                f"Thread created: {thread.mention}, but the agent failed to respond.",
-                ephemeral=True,
-            )
-            return
-
-    await send_chunked(thread, response)
-    await interaction.followup.send(
-        f"Thread created: {thread.mention}", ephemeral=True
-    )
 
 
 # ---------------------------------------------------------------------------

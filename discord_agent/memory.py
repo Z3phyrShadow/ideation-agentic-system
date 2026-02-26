@@ -38,6 +38,7 @@ async def build_message_history(
     thread: discord.Thread,
     system_prompt: str,
     bot_id: int,
+    seed_content: str | None = None,
 ) -> list[BaseMessage]:
     """
     Build a LangChain message list from a Discord thread's history.
@@ -47,12 +48,20 @@ async def build_message_history(
         system_prompt: The agent's system/personality prompt text.
         bot_id:        The Discord user ID of the bot, used to identify
                        which messages are AI responses.
+        seed_content:  Optional text to prepend as the first HumanMessage
+                       (used when the opening message lives in the parent
+                       channel rather than in the thread itself).
 
     Returns:
         A list of BaseMessage objects ordered oldest-to-newest, with a
         SystemMessage prepended. Ready to pass directly to LangGraph.
     """
     messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+
+    # Inject the seed message (e.g. the original #ideas post) as the first
+    # human turn before replaying the thread history.
+    if seed_content:
+        messages.append(HumanMessage(content=seed_content))
 
     # thread.history() yields messages newest-first; we reverse for chronology.
     raw_messages: list[discord.Message] = []

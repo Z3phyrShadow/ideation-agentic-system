@@ -30,5 +30,5 @@ DISCORD_TOKEN: str = _require("DISCORD_TOKEN")
 # Google Generative AI API key
 GEMINI_API_KEY: str = _require("GEMINI_API_KEY")
 
-# The Discord channel ID where the bot creates new threads on /chat
+# The Discord channel ID of #ideas — the bot creates a thread on every new message posted there.
 AGENT_CHANNEL_ID: int = int(_require("AGENT_CHANNEL_ID"))
