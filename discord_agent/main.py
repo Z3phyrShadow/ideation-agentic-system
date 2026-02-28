@@ -14,6 +14,7 @@ Responsibilities:
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
@@ -98,9 +99,11 @@ async def _get_agent_response(thread: discord.Thread, seed_content: str | None =
     LangGraph's .invoke() is synchronous, so we offload it to a thread pool
     to avoid blocking the Discord async event loop.
     """
+    now = datetime.now(timezone.utc).strftime("%A, %d %B %Y %H:%M UTC")
+    effective_prompt = f"Current date and time: {now}\n\n{SYSTEM_PROMPT}"
     messages = await build_message_history(
         thread=thread,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=effective_prompt,
         bot_id=client.user.id,  # type: ignore[union-attr]
         seed_content=seed_content,
     )

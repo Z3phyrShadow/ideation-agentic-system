@@ -1,17 +1,17 @@
 """
 tools.py
 --------
-LangChain tool definitions for document ingestion and understanding.
+LangChain tool definitions for document ingestion and web research.
 
 Tools:
-    fetch_url         — Fetch a URL and return readable plain text.
+    search_web        — Search the web via Tavily and return ranked results.
+    fetch_url         — Fetch a URL and return clean article text (trafilatura).
     read_attachment   — Download a Discord CDN file and extract its text.
     summarize_document — Chunk and summarize a large block of text.
 """
 
 import io
 import logging
-import re
 from typing import Optional
 
 import httpx
@@ -23,14 +23,15 @@ log = logging.getLogger("discord_agent.tools")
 # Constants
 # ---------------------------------------------------------------------------
 
-_HTTP_TIMEOUT: float = 15.0          # seconds
-_MAX_TEXT_CHARS: int = 8_000         # max chars returned to the agent raw
-_SUMMARIZE_THRESHOLD: int = 6_000    # chars above which summarize_document is useful
-_CHUNK_SIZE: int = 4_000             # chars per chunk when chunking for summary
+_HTTP_TIMEOUT: float = 15.0
+_MAX_TEXT_CHARS: int = 8_000
+_SUMMARIZE_THRESHOLD: int = 6_000
+_CHUNK_SIZE: int = 4_000
+_SEARCH_MAX_RESULTS: int = 3        # keep low to conserve Tavily credits
 
 _SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
-    ".txt", ".md", ".rst", ".csv",   # plain text variants
-    ".pdf",                           # PDF (via pypdf)
+    ".txt", ".md", ".rst", ".csv",
+    ".pdf",
 })
 
 # ---------------------------------------------------------------------------
@@ -38,23 +39,30 @@ _SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 
-def _html_to_text(html: str) -> str:
-    """Strip HTML tags and collapse whitespace to produce readable plain text."""
+def _html_to_text(html: str, url: str = "") -> str:
+    """
+    Extract clean article text from HTML using trafilatura.
+    Falls back to a simple tag-strip if trafilatura returns nothing.
+    """
     try:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "html.parser")
-        # Remove script / style noise.
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        text = soup.get_text(separator="\n")
-    except ImportError:
-        # Fallback: crude regex strip.
-        text = re.sub(r"<[^>]+>", " ", html)
+        import trafilatura
+        text = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            no_fallback=False,
+            url=url or None,
+        )
+        if text:
+            return text
+    except Exception as exc:
+        log.warning("trafilatura failed (%s), falling back to tag-strip", exc)
 
-    # Collapse excessive whitespace.
+    # Fallback: crude regex strip
+    import re
+    text = re.sub(r"<[^>]+>", " ", html)
     lines = [line.strip() for line in text.splitlines()]
-    text = "\n".join(line for line in lines if line)
-    return text
+    return "\n".join(line for line in lines if line)
 
 
 def _extract_pdf_text(data: bytes) -> str:
@@ -83,12 +91,63 @@ def _truncate(text: str, max_chars: int = _MAX_TEXT_CHARS) -> str:
 
 
 @tool
+def search_web(query: str) -> str:
+    """
+    Search the web for current information and return the top results.
+
+    Use this tool ONLY when:
+    - The user explicitly asks you to search, research, or look something up.
+    - The question requires up-to-date information that your training data
+      may not contain (e.g. recent news, current prices, live events).
+    - Do NOT call this for general knowledge questions you can answer directly.
+
+    After getting results, call fetch_url on the most relevant result URL
+    to read the full content before forming your response.
+
+    Args:
+        query: A concise, specific search query (as you'd type into Google).
+
+    Returns:
+        Numbered list of results with title, URL, and a short snippet each.
+        Returns an error string if the search fails.
+    """
+    log.info("[tool] search_web: %r", query)
+    try:
+        from tavily import TavilyClient
+        from discord_agent.config import TAVILY_API_KEY
+
+        client = TavilyClient(api_key=TAVILY_API_KEY)
+        response = client.search(
+            query=query,
+            max_results=_SEARCH_MAX_RESULTS,
+            search_depth="basic",   # "basic" uses fewer credits than "advanced"
+        )
+
+        results = response.get("results", [])
+        if not results:
+            return "[No results found for this query.]"
+
+        lines: list[str] = []
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "No title")
+            url = r.get("url", "")
+            snippet = r.get("content", "").strip()[:300]
+            lines.append(f"{i}. **{title}**\n   URL: {url}\n   {snippet}")
+
+        return "\n\n".join(lines)
+
+    except Exception as exc:
+        log.exception("[tool] search_web failed")
+        return f"[Web search failed: {exc}]"
+
+
+@tool
 def fetch_url(url: str) -> str:
     """
-    Fetch the content of a web URL and return it as readable plain text.
+    Fetch the content of a web URL and return it as clean readable text.
 
-    Use this tool whenever the user mentions or pastes a URL in their message
-    and you need to understand what the page contains before responding.
+    Use this tool whenever the user mentions or pastes a URL, or after
+    search_web returns a result you want to read in full.
 
     Args:
         url: The full URL to fetch (must start with http:// or https://).
@@ -107,14 +166,14 @@ def fetch_url(url: str) -> str:
             response.raise_for_status()
 
         content_type = response.headers.get("content-type", "")
-        if "pdf" in content_type or url.lower().endswith(".pdf"):
+        if "pdf" in content_type or url.lower().split("?")[0].endswith(".pdf"):
             text = _extract_pdf_text(response.content)
-        elif "html" in content_type:
-            text = _html_to_text(response.text)
+        elif "html" in content_type or "text" in content_type:
+            text = _html_to_text(response.text, url=url)
         else:
             text = response.text
 
-        if not text.strip():
+        if not text or not text.strip():
             return "[The page returned no readable text content.]"
 
         return _truncate(text)
@@ -132,24 +191,19 @@ def read_attachment(url: str, filename: Optional[str] = None) -> str:
     """
     Download a file from a Discord CDN URL and extract its text content.
 
-    Use this tool when the user shares a file attachment (.txt, .md, .pdf, .csv, .rst)
-    in the thread. The attachment URL format is typically:
+    Use this tool when the user shares a file attachment (.txt, .md, .pdf,
+    .csv, .rst) in the thread. The attachment URL format is typically:
         https://cdn.discordapp.com/attachments/...
-
-    Supported formats: .txt, .md, .rst, .csv (plain text) and .pdf.
 
     Args:
         url:      Direct download URL for the attachment.
         filename: Optional filename hint used to detect the file type.
-                  If omitted, the extension is inferred from the URL.
 
     Returns:
         Extracted text content, truncated to ~8 000 characters.
-        Returns an error string if the file cannot be read.
     """
     log.info("[tool] read_attachment: %s (filename=%s)", url, filename)
 
-    # Determine extension.
     name = filename or url.split("?")[0].split("/")[-1]
     ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
@@ -187,9 +241,8 @@ def summarize_document(text: str) -> str:
     """
     Summarize a large block of text that is too long to reason over directly.
 
-    Use this tool when extracted document text exceeds roughly 6 000 characters.
-    It splits the text into chunks, summarizes each, and returns a condensed
-    version you can reason over without losing the key information.
+    Use this when text from fetch_url or read_attachment exceeds ~6 000 chars.
+    It chunks the text and returns a condensed version preserving key content.
 
     Args:
         text: The raw document text to summarize.
@@ -199,17 +252,14 @@ def summarize_document(text: str) -> str:
     """
     log.info("[tool] summarize_document: %d chars input", len(text))
 
-    # Lazy import to avoid circulars — tools.py is imported by graph.py which
-    # imports llm.py, so we import inside the function call.
     from discord_agent.llm import get_llm
+    from langchain_core.messages import HumanMessage
 
     llm = get_llm()
 
     if len(text) <= _SUMMARIZE_THRESHOLD:
-        # Short enough to summarize in one shot.
         chunks = [text]
     else:
-        # Split on paragraph boundaries where possible.
         chunks = []
         while len(text) > _CHUNK_SIZE:
             split_at = text.rfind("\n\n", 0, _CHUNK_SIZE)
@@ -231,20 +281,17 @@ def summarize_document(text: str) -> str:
             "concisely, preserving key facts, arguments, and data:\n\n"
             f"{chunk}"
         )
-        from langchain_core.messages import HumanMessage
         result = llm.invoke([HumanMessage(content=prompt)])
         chunk_summaries.append(str(result.content))
 
     if len(chunk_summaries) == 1:
         return chunk_summaries[0]
 
-    # Merge chunk summaries into a final consolidated summary.
     merge_prompt = (
         "The following are partial summaries of a longer document. "
         "Produce a single, coherent, concise summary that captures the whole:\n\n"
         + "\n\n---\n\n".join(chunk_summaries)
     )
-    from langchain_core.messages import HumanMessage
     final = llm.invoke([HumanMessage(content=merge_prompt)])
     return str(final.content)
 
@@ -253,4 +300,4 @@ def summarize_document(text: str) -> str:
 # Exported tool list
 # ---------------------------------------------------------------------------
 
-ALL_TOOLS = [fetch_url, read_attachment, summarize_document]
+ALL_TOOLS = [search_web, fetch_url, read_attachment, summarize_document]

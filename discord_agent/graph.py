@@ -105,6 +105,28 @@ _graph = _build_graph()
 # ---------------------------------------------------------------------------
 
 
+def _extract_text(content) -> str:
+    """
+    Safely extract a plain string from an LLM message's content field.
+
+    Gemini (and other multimodal models) sometimes return content as a list
+    of typed blocks, e.g.:
+        [{'type': 'text', 'text': '...', 'extras': {...}}]
+    instead of a plain string. This helper handles both cases.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts).strip()
+    return str(content)
+
+
 def run_graph(messages: list[BaseMessage]) -> str:
     """
     Run the agent graph with the given message history.
@@ -116,11 +138,9 @@ def run_graph(messages: list[BaseMessage]) -> str:
         The text content of the last AI message produced by the graph.
     """
     result = _graph.invoke({"messages": messages})
-    last_message: BaseMessage = result["messages"][-1]
-    # ToolMessage at end would be unexpected, but guard anyway.
-    if isinstance(last_message, ToolMessage):
-        # Find the last AIMessage instead.
-        for msg in reversed(result["messages"]):
-            if isinstance(msg, AIMessage):
-                return str(msg.content)
-    return str(last_message.content)
+    # Walk backwards to find the last AIMessage (ToolMessage at end is unexpected
+    # but guarded against).
+    for msg in reversed(result["messages"]):
+        if isinstance(msg, AIMessage):
+            return _extract_text(msg.content)
+    return _extract_text(result["messages"][-1].content)
