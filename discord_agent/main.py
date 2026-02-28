@@ -69,6 +69,21 @@ client = discord.Client(intents=intents)
 # ---------------------------------------------------------------------------
 
 
+def _attachment_note(attachments: list[discord.Attachment]) -> str:
+    """
+    Build a small text block listing attachment URLs so the agent can
+    call read_attachment() on them.
+
+    Returns an empty string if there are no attachments.
+    """
+    if not attachments:
+        return ""
+    lines = ["\n[Attachments in this message:]"] + [
+        f"  • {a.filename}: {a.url}" for a in attachments
+    ]
+    return "\n".join(lines)
+
+
 async def _get_agent_response(thread: discord.Thread, seed_content: str | None = None) -> str:
     """
     Reconstruct message history from the thread, invoke the LangGraph agent,
@@ -189,11 +204,13 @@ async def on_message(message: discord.Message) -> None:
         await store.save_thread(thread.id)
         log.info("Created thread %d ('%s')", thread.id, thread_name)
 
+        # Build seed content: the original message text + any attachment URLs
+        # so the agent can decide to call read_attachment() on them.
+        seed = message.content + _attachment_note(message.attachments)
+
         async with thread.typing():
             try:
-                # Pass the original message content as seed_content so the
-                # agent has context without re-posting it into the thread.
-                response = await _get_agent_response(thread, seed_content=message.content)
+                response = await _get_agent_response(thread, seed_content=seed)
             except Exception:
                 log.exception("Error generating opening response for thread %d", thread.id)
                 await thread.send(
