@@ -19,7 +19,7 @@ from pathlib import Path
 
 import discord
 
-from discord_agent import store
+from discord_agent import store, tracker
 from discord_agent.config import AGENT_CHANNEL_ID, DISCORD_TOKEN
 from discord_agent.graph import run_graph
 from discord_agent.memory import build_message_history
@@ -146,9 +146,30 @@ async def send_chunked(channel: discord.abc.Messageable, content: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Background tracker loop
+# ---------------------------------------------------------------------------
+
+_TRACKER_INTERVAL_SECONDS: int = 60 * 60  # 1 hour
+
+
+async def _tracker_loop() -> None:
+    """
+    Background task: runs the tracker once immediately on startup, then
+    repeats every hour. Errors are caught so the loop never silently dies.
+    """
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            await tracker.run_tracker(client, bot_threads)
+        except Exception:
+            log.exception("[tracker_loop] Unhandled error during tracker run")
+        await asyncio.sleep(_TRACKER_INTERVAL_SECONDS)
+
+
 @client.event
 async def on_ready() -> None:
-    """Initialise DB and restore persisted thread IDs."""
+    """Initialise DB, restore persisted thread IDs, and start background tracker."""
     log.info("Logged in as %s (ID: %s)", client.user, client.user.id)  # type: ignore[union-attr]
 
     # Initialise SQLite and load previously created thread IDs.
@@ -157,6 +178,10 @@ async def on_ready() -> None:
     bot_threads.update(loaded)
     log.info("Loaded %d persisted thread IDs from database.", len(loaded))
     log.info("Bot is ready. Listening on channel ID %d for new ideas.", AGENT_CHANNEL_ID)
+
+    # Launch the hourly tracker in the background.
+    asyncio.create_task(_tracker_loop())
+    log.info("Background tracker loop started (interval=%ds).", _TRACKER_INTERVAL_SECONDS)
 
 
 @client.event
@@ -222,6 +247,9 @@ async def on_message(message: discord.Message) -> None:
                 return
 
         await send_chunked(thread, response)
+
+        # Score the new thread immediately in the background (non-blocking).
+        asyncio.create_task(_score_and_persist_thread(thread))
         return
 
     # ------------------------------------------------------------------
@@ -254,6 +282,28 @@ async def on_message(message: discord.Message) -> None:
             return
 
     await send_chunked(thread, response)
+
+
+# ---------------------------------------------------------------------------
+# Single-thread fast scorer (called on new thread creation)
+# ---------------------------------------------------------------------------
+
+
+async def _score_and_persist_thread(thread: discord.Thread) -> None:
+    """
+    Score a single newly-created thread and update the DB + Calendar.
+    Runs as a fire-and-forget asyncio task.
+    """
+    try:
+        record = await tracker.score_thread(thread)
+        if record is None:
+            return
+        await store.upsert_idea(**record)
+        top = await store.get_top_idea()
+        if top:
+            tracker._trigger_calendar_update(top)
+    except Exception:
+        log.exception("[_score_and_persist_thread] Failed for thread %d", thread.id)
 
 
 # ---------------------------------------------------------------------------
