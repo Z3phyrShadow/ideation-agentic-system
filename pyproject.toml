@@ -22,4 +22,4 @@ dependencies = [
 ]
 
 [project.scripts]
-discord-agent = "discord_agent.main:main"
+ideation-system = "discord_bot.main:main"

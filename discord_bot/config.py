@@ -35,3 +35,6 @@ AGENT_CHANNEL_ID: int = int(_require("AGENT_CHANNEL_ID"))
 
 # Tavily API key for web search
 TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
+
+# The Discord channel ID of #career — the bot runs learning tracker setup on messages posted there.
+CAREER_CHANNEL_ID: int = int(_require("CAREER_CHANNEL_ID"))

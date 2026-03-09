@@ -49,6 +49,16 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS career_profiles (
+                user_id      INTEGER PRIMARY KEY,
+                role_target  TEXT    NOT NULL DEFAULT '',
+                skills_json  TEXT    NOT NULL DEFAULT '[]',
+                last_updated TEXT    NOT NULL DEFAULT ''
+            )
+            """
+        )
         await db.commit()
 
 
@@ -132,3 +142,42 @@ async def get_top_idea() -> Optional[dict]:
     """Return the highest-scoring idea, or None if no ideas are scored yet."""
     ideas = await load_ideas()
     return ideas[0] if ideas else None
+
+
+# ---------------------------------------------------------------------------
+# career_profiles operations
+# ---------------------------------------------------------------------------
+
+
+async def upsert_career_profile(
+    user_id: int,
+    role_target: str,
+    skills_json: str,
+) -> None:
+    """Insert or update a user's career profile."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO career_profiles (user_id, role_target, skills_json, last_updated)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                role_target  = excluded.role_target,
+                skills_json  = excluded.skills_json,
+                last_updated = excluded.last_updated
+            """,
+            (user_id, role_target, skills_json, now_iso),
+        )
+        await db.commit()
+
+
+async def get_career_profile(user_id: int) -> Optional[dict]:
+    """Return a user's career profile, or None if not set up yet."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM career_profiles WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row else None

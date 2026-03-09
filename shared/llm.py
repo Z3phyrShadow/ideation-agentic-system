@@ -4,10 +4,9 @@ llm.py
 Initializes and exposes the Gemini LLM instance via the LangChain adapter.
 
 Two factory functions are provided:
-    get_llm()             — bare LLM, no tools bound (used internally, e.g.
-                            inside summarize_document to avoid circular binding).
-    get_llm_with_tools()  — LLM with all document-ingestion tools bound;
-                            used by the agent node in graph.py.
+    get_llm()             — bare LLM, no tools bound (used internally).
+    get_llm_with_tools()  — LLM with all ideation tools bound;
+                            used by the ideation agent in agents/ideation/graph.py.
 """
 
 from functools import lru_cache
@@ -15,7 +14,7 @@ from functools import lru_cache
 from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from discord_agent.config import GEMINI_API_KEY
+from discord_bot.config import GEMINI_API_KEY
 
 
 @lru_cache(maxsize=1)
@@ -36,10 +35,10 @@ def get_llm() -> ChatGoogleGenerativeAI:
 @lru_cache(maxsize=1)
 def get_llm_with_tools() -> BaseChatModel:
     """
-    Return a cached LLM instance with all document-ingestion tools bound.
+    Return a cached LLM instance with all ideation document tools bound.
 
-    Lazy-imports ALL_TOOLS from tools.py to avoid a circular import at
-    module load time (tools.py imports get_llm from this module).
+    Lazy-imports ALL_TOOLS from the tools package to avoid a circular import
+    at module load time (tools imports get_llm from this module).
     """
-    from discord_agent.tools import ALL_TOOLS  # deferred import
+    from tools import ALL_TOOLS  # deferred import
     return get_llm().bind_tools(ALL_TOOLS)
