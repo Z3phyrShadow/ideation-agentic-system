@@ -1,43 +1,67 @@
-# Discord AI Assistant
+# Ideation Agentic System
 
-A production-ready MVP Discord bot powered by **Gemini 2.5 Flash**, orchestrated via **LangGraph**, with Discord threads as persistent conversation logs and SQLite-backed thread tracking.
+A Discord-native personal assistant powered by **Gemini 2.5 Flash** and **LangGraph**, evolving from idea capture to career development — all within Discord.
+
+---
+
+## What it does
+
+**Drop an idea in `#ideas`** → Bot spins up a thread, starts a ReAct conversation, scores the idea hourly, and includes it in your 9AM morning brief.
+
+**Drop your resume in `#career`** → Career ReAct agent researches the market, identifies skill gaps, recommends certifications + resources, and seeds portfolio project ideas into `#ideas`.
+
+**Every morning at 9AM** → A Google Calendar event is created with your top project idea, today's schedule, and idea pipeline stats. You get a notification at 8:55AM.
 
 ---
 
 ## Architecture
 
 ```
-discord_agent/
-├── main.py           # Entry point — Discord client, slash commands, events
-├── graph.py          # LangGraph definition (START → agent_node → END)
-├── llm.py            # Gemini 2.5 Flash initialization via LangChain adapter
-├── memory.py         # Reconstructs message history from Discord thread
-├── store.py          # SQLite persistence for bot-created thread IDs
-├── config.py         # Environment variable loading and validation
-└── system_prompt.txt # Agent personality prompt
+ideation-agentic-system/
+├── discord_bot/           # Bot interface (main.py, config.py)
+│
+├── agents/
+│   ├── ideation/          # LangGraph ReAct — web search, URL fetch, doc summarize
+│   ├── career/            # LangGraph ReAct — autonomous Tavily market research
+│   └── tracker/           # Hourly scoring pipeline (portfolio + activity scores)
+│
+├── tools/                 # Shared across agents
+│   ├── web_search.py      # Tavily wrapper
+│   ├── document.py        # PDF extraction, URL fetch, summarization
+│   └── ocr.py             # Gemini Vision OCR (scanned PDF fallback)
+│
+└── shared/                # Infrastructure
+    ├── store.py            # SQLite (threads, ideas, career profiles)
+    ├── llm.py              # Gemini 2.5 Flash via LangChain
+    ├── calendar_client.py  # Google Calendar OAuth2 client
+    └── brief.py            # Morning brief assembler
 ```
 
-### How it works
+### Agent flows
 
-1. User runs `/chat <message>` — bot creates a new thread in the configured channel.
-2. The opening message is sent through LangGraph → Gemini → response posted in thread.
-3. Every subsequent message in the thread triggers the bot to:
-   - Fetch the last 30 messages from the thread.
-   - Reconstruct LangChain message history (SystemMessage + HumanMessage/AIMessage).
-   - Invoke LangGraph → Gemini.
-   - Post the response.
-4. Thread IDs are stored in `threads.db` (SQLite) — the bot resumes responding to all previous threads after a restart.
+**Ideation agent** (`agents/ideation/`)
+- LangGraph ReAct loop: LLM decides when to call `search_web`, `fetch_url`, `read_attachment`, `summarize_document`
+- Discord thread = persistent conversation memory
+
+**Career agent** (`agents/career/`)
+- LangGraph ReAct loop, single tool: `search_market` (Tavily)
+- LLM reads the resume, *decides which searches to run*, iterates until it has enough data
+- Produces skill gap report + project suggestions in one agentic pass
+
+**Tracker** (`agents/tracker/`)
+- Runs every hour
+- Portfolio score (LLM, 1–10) × Activity score (recency + volume + momentum)
 
 ---
 
 ## Setup
 
-### 1. Prerequisites
-
+### Prerequisites
 - Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/) installed
+- [`uv`](https://docs.astral.sh/uv/)
+- Google Cloud project with Calendar API enabled + `credentials.json`
 
-### 2. Clone and install dependencies
+### Install
 
 ```bash
 git clone <repo-url>
@@ -45,75 +69,42 @@ cd ideation-agentic-system
 uv sync
 ```
 
-### 3. Create a Discord Application
-
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications).
-2. Create a new application → add a **Bot**.
-3. Under **Bot**, enable:
-   - `MESSAGE CONTENT INTENT`
-   - `SERVER MEMBERS INTENT`
-4. Under **OAuth2 → URL Generator**, select scopes: `bot`, `applications.commands`.
-5. Select bot permissions: `Send Messages`, `Create Public Threads`, `Read Message History`.
-6. Copy the generated URL and invite the bot to your server.
-7. Copy the **Bot Token**.
-
-### 4. Configure environment variables
+### Environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
-
 ```env
 DISCORD_TOKEN=your_bot_token
 GEMINI_API_KEY=your_gemini_api_key
-AGENT_CHANNEL_ID=123456789012345678  # Channel where threads are created
+AGENT_CHANNEL_ID=        # #ideas channel ID
+CAREER_CHANNEL_ID=       # #career channel ID
+TAVILY_API_KEY=your_tavily_key
 ```
 
-> **Getting `AGENT_CHANNEL_ID`:** In Discord, enable Developer Mode (Settings → Advanced), then right-click the target channel and select **Copy Channel ID**.
+> **Channel IDs:** Discord → Settings → Advanced → Enable Developer Mode → right-click channel → Copy Channel ID.
 
-> **Getting `GEMINI_API_KEY`:** Visit [Google AI Studio](https://aistudio.google.com/app/apikey).
+> **Google Calendar:** Download OAuth2 credentials (Desktop app) from Google Cloud Console as `credentials.json` in the project root. The OAuth browser flow runs automatically on first start.
 
-### 5. Run the bot
+### Run
 
 ```bash
-uv run python -m discord_agent.main
+uv run python -m discord_bot.main
 ```
 
 ---
 
 ## Usage
 
-| Action | How |
+| Channel | Action |
 |---|---|
-| Start a new conversation | `/chat <your message>` in any server channel |
-| Continue a conversation | Just type in the bot's thread — no mention needed |
-| New session after restart | Bot automatically resumes all previous threads |
+| `#ideas` | Post any idea → bot creates a thread and starts a conversation |
+| `#ideas` thread | Continue the conversation — no mention needed |
+| `#career` | Post your target role + attach resume PDF → career agent runs |
 
 ---
 
-## Design Decisions
+## Tech stack
 
-| Decision | Rationale |
-|---|---|
-| Discord threads as memory | Zero-infrastructure conversation log; no DB needed for messages |
-| SQLite (`threads.db`) | Lightweight persistence for thread IDs; survives restarts without external services |
-| `asyncio.to_thread` for LangGraph | LangGraph's `.invoke()` is sync; wrapping prevents blocking the async event loop |
-| `langchain-google-genai` adapter | Proper LangChain/LangGraph integration with `BaseMessage`-compatible types |
-| System prompt from file | Allows editing personality without touching code |
-
----
-
-## Extending the Agent
-
-To add new nodes to the LangGraph pipeline (e.g., planner, tools, evaluator), edit `graph.py`:
-
-```python
-builder.add_node("planner", planner_node)
-builder.add_edge(START, "planner")
-builder.add_edge("planner", "agent")
-builder.add_edge("agent", END)
-```
-
-The `run_graph()` interface in `graph.py` and all calling code in `main.py` remain unchanged.
+`discord.py` · `LangGraph` · `langchain-google-genai` · `Gemini 2.5 Flash` · `Tavily` · `Google Calendar API` · `SQLite (aiosqlite)` · `pypdf` · `trafilatura`
