@@ -115,6 +115,40 @@ async def report_task_complete(task_id: int, repo_url: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool: mark_project_complete
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def mark_project_complete(task_id: int) -> dict:
+    """
+    Mark a project as done — stops GitHub commit tracking and morning brief inclusion.
+
+    Call this when the project has been shipped/published.
+
+    Args:
+        task_id: The build task ID linked to the idea (returned by get_next_task).
+    """
+    from shared import store
+    import aiosqlite
+    from pathlib import Path
+
+    async with aiosqlite.connect(Path("threads.db")) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT thread_id FROM build_tasks WHERE id = ?", (task_id,)
+        )
+        row = await cursor.fetchone()
+
+    if row is None:
+        return {"status": "error", "detail": "task not found"}
+
+    await store.mark_idea_done(row["thread_id"])
+    log.info("[mcp] Marked idea thread=%d as done (task_id=%d)", row["thread_id"], task_id)
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
 # Server lifecycle (run as background asyncio task from main.py)
 # ---------------------------------------------------------------------------
 

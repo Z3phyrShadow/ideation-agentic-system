@@ -67,6 +67,7 @@ ideation-agentic-system/
 ```
 ideating → (queue_build_task called) → Antigravity scaffolds repo
          → building → tracker polls GitHub commits → brief shows commit count
+         → done     → all tracking stopped, removed from morning brief
 ```
 
 ### Antigravity ↔ Bot via MCP
@@ -154,6 +155,7 @@ uv run python -m discord_bot.main
 | `#ideas` | Post any idea → bot creates a thread and starts a conversation |
 | `#ideas` thread | Continue the conversation — no mention needed |
 | `#ideas` thread | Say "let's build this" → queues repo scaffolding for Antigravity |
+| `#ideas` thread | Say "project is done / shipped" → stops all tracking |
 | `#career` | Post your target role + attach resume PDF → career agent runs |
 
 ---

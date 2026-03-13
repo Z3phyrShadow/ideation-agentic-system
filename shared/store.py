@@ -206,6 +206,16 @@ async def set_idea_building(thread_id: int, repo_url: str) -> None:
         await db.commit()
 
 
+async def mark_idea_done(thread_id: int) -> None:
+    """Mark an idea as done — stops all tracking (Discord activity and GitHub commits)."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "UPDATE ideas SET status = 'done' WHERE thread_id = ?",
+            (thread_id,),
+        )
+        await db.commit()
+
+
 async def update_idea_activity(thread_id: int, activity_score: float) -> None:
     """Update only the activity score for a building idea (GitHub commits)."""
     async with aiosqlite.connect(_DB_PATH) as db:

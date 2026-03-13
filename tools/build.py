@@ -75,3 +75,44 @@ def queue_build_task(idea_title: str, idea_summary: str, stack_hint: str = "") -
     except Exception as exc:
         log.exception("[tool] queue_build_task failed")
         return f"[Failed to queue build task: {exc}]"
+
+
+@tool
+def mark_project_done(reason: str = "") -> str:
+    """
+    Mark this project as completed and stop all tracking.
+
+    Call this when the user says the project is done, shipped, finished, or complete.
+    This stops GitHub commit polling and removes the idea from the morning brief.
+
+    Args:
+        reason: Optional one-line note on what was shipped (e.g. "Published to PyPI").
+
+    Returns:
+        Confirmation message to relay to the user.
+    """
+    thread_id: int = getattr(mark_project_done, "_current_thread_id", 0)
+    log.info("[tool] mark_project_done: thread=%d reason=%r", thread_id, reason)
+
+    try:
+        con = sqlite3.connect(_DB_PATH)
+        try:
+            con.execute(
+                "UPDATE ideas SET status = 'done' WHERE thread_id = ?",
+                (thread_id,),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        log.info("[tool] Idea thread=%d marked as done.", thread_id)
+        suffix = f" ({reason})" if reason else ""
+        return (
+            f"✅ Project marked as complete{suffix}! "
+            f"Tracking stopped — it won't appear in the morning brief anymore. "
+            f"🎉 Congrats on shipping!"
+        )
+
+    except Exception as exc:
+        log.exception("[tool] mark_project_done failed")
+        return f"[Failed to mark project done: {exc}]"

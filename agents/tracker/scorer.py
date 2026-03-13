@@ -165,7 +165,7 @@ async def run_tracker(client: discord.Client, bot_threads: set[int]) -> None:
         except Exception:
             log.exception("[tracker] Failed to upsert idea for thread %d", thread_id)
 
-    # -- Poll GitHub commit activity for building ideas --
+    # -- Poll GitHub commit activity for building ideas (skips done/ideating) --
     building = await store.load_building_ideas()
     if building:
         log.info("[tracker] Polling GitHub activity for %d building idea(s).", len(building))

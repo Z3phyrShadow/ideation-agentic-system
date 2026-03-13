@@ -81,9 +81,10 @@ async def _get_agent_response(thread: discord.Thread, seed_content: str | None =
         bot_id=client.user.id,  # type: ignore[union-attr]
         seed_content=seed_content,
     )
-    # Inject thread_id context so queue_build_task can associate the task
-    from tools.build import queue_build_task as _qbt
+    # Inject thread_id context so queue_build_task and mark_project_done can associate with the right idea
+    from tools.build import queue_build_task as _qbt, mark_project_done as _mpd
     _qbt._current_thread_id = thread.id  # type: ignore[attr-defined]
+    _mpd._current_thread_id = thread.id  # type: ignore[attr-defined]
     response: str = await asyncio.to_thread(run_graph, messages)
     return response
 
