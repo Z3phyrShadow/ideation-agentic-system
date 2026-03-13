@@ -38,3 +38,10 @@ TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
 
 # The Discord channel ID of #career — the bot runs learning tracker setup on messages posted there.
 CAREER_CHANNEL_ID: int = int(_require("CAREER_CHANNEL_ID"))
+
+# GitHub personal access token (read-only) — used by tracker to poll commit activity.
+# Optional: leave unset to use unauthenticated GitHub API (lower rate limits).
+GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
+
+# Port for the local MCP server that Antigravity connects to.
+MCP_PORT: int = int(os.getenv("MCP_PORT", "8765"))

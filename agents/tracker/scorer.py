@@ -138,14 +138,11 @@ async def score_thread(thread: discord.Thread) -> Optional[dict]:
 
 
 async def run_tracker(client: discord.Client, bot_threads: set[int]) -> None:
-    """Score all tracked threads and persist results."""
-    if not bot_threads:
-        log.info("[tracker] No threads to score.")
-        return
-
-    log.info("[tracker] Starting scoring run for %d threads.", len(bot_threads))
+    """Score all tracked threads and persist results. Also poll GitHub for building ideas."""
+    log.info("[tracker] Starting scoring run — %d threads, polling GitHub for building ideas.", len(bot_threads))
     scored = 0
 
+    # -- Score ideating threads via Discord activity --
     for thread_id in list(bot_threads):
         thread: Optional[discord.Thread] = client.get_channel(thread_id)  # type: ignore[assignment]
         if thread is None:
@@ -168,4 +165,26 @@ async def run_tracker(client: discord.Client, bot_threads: set[int]) -> None:
         except Exception:
             log.exception("[tracker] Failed to upsert idea for thread %d", thread_id)
 
-    log.info("[tracker] Scored %d/%d threads.", scored, len(bot_threads))
+    # -- Poll GitHub commit activity for building ideas --
+    building = await store.load_building_ideas()
+    if building:
+        log.info("[tracker] Polling GitHub activity for %d building idea(s).", len(building))
+        from tools.github import fetch_github_activity
+        for idea in building:
+            repo_url = idea.get("repo_url", "")
+            if not repo_url:
+                continue
+            try:
+                commit_count = await asyncio.to_thread(fetch_github_activity, repo_url)
+                # Map commit count (0+) to an activity score (1–10)
+                # 0 commits → 1.0, 10+ commits → 10.0
+                activity_score = round(min(10.0, 1.0 + commit_count * 0.9), 2)
+                await store.update_idea_activity(idea["thread_id"], activity_score)
+                log.info(
+                    "[tracker] %r — %d commits this week → activity_score=%.2f",
+                    idea.get("title"), commit_count, activity_score,
+                )
+            except Exception:
+                log.exception("[tracker] GitHub poll failed for %s", repo_url)
+
+    log.info("[tracker] Scored %d ideating threads, %d building ideas polled.", scored, len(building))

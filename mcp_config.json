@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+        "ideation-system": {
+            "command": "uv",
+            "args": [
+                "--directory",
+                "C:\\Users\\tosha\\Desktop\\Projects\\ideation-agentic-system",
+                "run",
+                "python",
+                "-m",
+                "mcp_server.cli"
+            ]
+        }
+    }
+}

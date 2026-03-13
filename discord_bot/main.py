@@ -81,6 +81,9 @@ async def _get_agent_response(thread: discord.Thread, seed_content: str | None =
         bot_id=client.user.id,  # type: ignore[union-attr]
         seed_content=seed_content,
     )
+    # Inject thread_id context so queue_build_task can associate the task
+    from tools.build import queue_build_task as _qbt
+    _qbt._current_thread_id = thread.id  # type: ignore[attr-defined]
     response: str = await asyncio.to_thread(run_graph, messages)
     return response
 
@@ -145,6 +148,62 @@ async def _morning_brief_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Build task completion poller
+# ---------------------------------------------------------------------------
+
+_BUILD_POLL_INTERVAL: int = 30  # seconds
+_notified_tasks: set[int] = set()  # task IDs already announced
+
+
+async def _build_task_poller() -> None:
+    """
+    Background task: polls the DB every 30 seconds for build tasks that
+    Antigravity has marked as done. Sends the '🚀 repo is live' handoff
+    message to the relevant Discord thread.
+
+    This replaces a direct async callback since the MCP server now runs as
+    a separate stdio subprocess (spawned by Antigravity), not in-process.
+    """
+    await client.wait_until_ready()
+    while not client.is_closed():
+        await asyncio.sleep(_BUILD_POLL_INTERVAL)
+        try:
+            async with __import__('aiosqlite').connect(
+                __import__('pathlib').Path('threads.db')
+            ) as db:
+                db.row_factory = __import__('aiosqlite').Row
+                cursor = await db.execute(
+                    "SELECT id, thread_id, repo_url FROM build_tasks "
+                    "WHERE status = 'done' AND completed_at != '' "
+                    "ORDER BY completed_at DESC LIMIT 20"
+                )
+                rows = await cursor.fetchall()
+
+            for row in rows:
+                task_id = row['id']
+                if task_id in _notified_tasks:
+                    continue
+                _notified_tasks.add(task_id)
+                thread_id = row['thread_id']
+                repo_url = row['repo_url']
+                try:
+                    thread = client.get_channel(thread_id)
+                    if thread is None:
+                        thread = await client.fetch_channel(thread_id)
+                    if isinstance(thread, discord.Thread):
+                        await thread.send(
+                            f"\U0001f680 **Repo is live!** Antigravity has scaffolded your project.\n"
+                            f"\u2192 {repo_url}\n\n"
+                            f"Go forth, padawan \u2014 your destiny awaits. \u2728"
+                        )
+                        log.info("[mcp] Sent build-complete message to thread %d", thread_id)
+                except Exception:
+                    log.exception("[mcp] Failed to notify thread %d", thread_id)
+        except Exception:
+            log.exception("[build_poller] Unhandled error")
+
+
+# ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
 
@@ -164,6 +223,9 @@ async def on_ready() -> None:
 
     asyncio.create_task(_morning_brief_loop())
     log.info("Morning brief loop started (fires at 09:00 local time).")
+
+    asyncio.create_task(_build_task_poller())
+    log.info("Build task poller started (interval=%ds).", _BUILD_POLL_INTERVAL)
 
 
 @client.event
